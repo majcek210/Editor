@@ -133,3 +133,30 @@ jobs:
         with:
           name: emulator-report
           path: hackatime-editor/out/emulator-report.md
+
+  # Publishes the APK as a pre-release so it has a stable, direct download link:
+  # https://github.com/<owner>/<repo>/releases/download/debug-latest/hackatime-editor-debug.apk
+  publish-apk:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: hackatime-editor-debug-apk
+          path: out
+
+      - name: Replace the debug-latest pre-release
+        working-directory: out
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cp hackatime-editor-0.1.0-debug.apk hackatime-editor-debug.apk
+          gh release delete debug-latest --yes --cleanup-tag || true
+          gh release create debug-latest hackatime-editor-debug.apk SHA256SUMS \
+            --prerelease --target "$GITHUB_SHA" \
+            --title "Debug build (latest)" \
+            --notes "Debug APK built by CI from ${GITHUB_SHA::7} on ${GITHUB_REF_NAME}. Install hackatime-editor-debug.apk on Android 8.0 or newer."
