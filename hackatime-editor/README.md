@@ -71,7 +71,8 @@ Rules, enforced in `src/core/tracker/throttle.ts` and covered by
   `visibilitychange`; the Kotlin plugin also refuses while paused).
 - Nothing when there has been no touch, key or text input for 2 minutes.
 - No timers, no periodic or background pings. Restoring tabs at startup does
-  not send anything.
+  not send anything, and neither do Git operations or files reloaded after a
+  pull or checkout.
 - At most one CLI process at a time; an edit heartbeat that arrives while one
   is running is dropped, not queued.
 
@@ -112,6 +113,41 @@ key, 112 CLI backing off after an earlier failure.
 
 Research behind each of these choices, with file and line references, is in
 [NOTES.md](NOTES.md).
+
+## Git
+
+The Source Control view (branch icon in the activity bar, or Ctrl+Shift+G)
+works like VS Code's:
+
+- **Clone**: Command palette, `Git: Clone...`, or the button in Source
+  Control / Settings. Paste an `https://` URL; the repo is cloned into a new
+  project folder in app storage and opened.
+- **Changes**: staged and unstaged files with Stage (+), Unstage (-) and
+  Discard. Tap a file to open it.
+- **Commit**: type a message and tap Commit. With nothing staged it offers to
+  stage everything first.
+- **Push / Pull / Sync**: buttons in the view header; the status bar shows the
+  branch and `behind/ahead` counts, and tapping the counts syncs (pull, then
+  push). Without a remote, Push asks for one.
+- **Branches**: tap the branch in the status bar to switch, or create one.
+  Remote branches get a local tracking branch.
+- **Init** a repository in any project folder, and `Git: Show Commit Log`.
+
+Setup, in Settings, Git: your name and email (for commits), the host
+(default `github.com`), your username and a personal access token. On GitHub
+create a fine-grained token with "Contents: Read and write" at
+https://github.com/settings/personal-access-tokens/new. Public repos can be
+cloned without a token.
+
+How it works: JGit 5.13 runs inside the app (no `git` binary needed). Only
+`https://` remotes are supported (no SSH), and credentials in URLs are
+refused. The token is stored in the app's private storage, is never returned
+to the web layer, is removed from error messages, and is only offered to the
+host it was saved for. After a pull or branch switch, open tabs without
+unsaved changes are reloaded from disk.
+
+Git and time tracking are separate: Git operations never send heartbeats,
+and files changed by a pull or checkout do not count as edits.
 
 ## Features
 
@@ -193,7 +229,11 @@ repository, which the Android build also needs.
   nothing while idle or backgrounded, no timers), CLI argument construction,
   API key redaction, tracker on/off rules, fuzzy matching.
 - `./gradlew testDebugUnitTest`: Kotlin allow-list, redaction, config file,
-  process runner (environment, timeout kill) and the invocation log.
+  process runner (environment, timeout kill), the invocation log, and Git
+  (clone, stage, commit, push, pull, branches against a local remote; the
+  token is only offered to its host).
+- `connectedDebugAndroidTest` (run by the CI emulator job): JGit on Android,
+  cloning a public GitHub repo over HTTPS and committing.
 
 ## License
 

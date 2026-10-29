@@ -3,6 +3,7 @@ import { toast } from './dialogs';
 import type { EditorApp } from './app';
 import { describeFailure, exitMeaning } from '../core/tracker/tracker';
 import { redactText } from '../core/tracker/redact';
+import { Git, errText as gitErr } from '../native/git';
 
 const SETUP_URL = 'https://hackatime.hackclub.com/my/wakatime_setup';
 
@@ -84,6 +85,8 @@ export function renderSettings(host: HTMLElement, app: EditorApp): void {
       info?.hasApiKey ? h('button', { class: 'btn secondary', onclick: () => void tracker.clearApiKey().then(() => { toast('API key removed'); app.rerender(); }) }, 'Remove key') : null),
     testBox,
     h('table', { class: 'facts' }, ...facts.map(([k, v]) => h('tr', {}, h('th', {}, k), h('td', {}, v)))),
+    h('h2', {}, 'Git'),
+    gitSection(app),
     h('h2', {}, 'Editor'),
     row('Font size', fontSize),
     row('Soft wrap', h('label', { class: 'check' }, wrap, ' Wrap long lines')),
@@ -94,4 +97,46 @@ export function renderSettings(host: HTMLElement, app: EditorApp): void {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : typeof e === 'object' && e && 'message' in e ? String((e as { message: unknown }).message) : String(e);
+}
+
+const TOKEN_HELP = 'https://github.com/settings/personal-access-tokens/new';
+
+function gitSection(app: EditorApp): HTMLElement {
+  const box = h('div', { class: 'git-settings' }, h('p', { class: 'muted' }, 'Loading...'));
+  void Git.getConfig().then((cfg) => {
+    box.textContent = '';
+    const field = (label: string, value: string, attrs: Record<string, string> = {}) =>
+      h('input', { class: 'text-input', value, placeholder: label, autocomplete: 'off', spellcheck: 'false', autocapitalize: 'off', ...attrs });
+    const name = field('Your Name', cfg.name);
+    const email = field('you@example.com', cfg.email, { type: 'email' });
+    const host = field('github.com', cfg.host);
+    const user = field('GitHub username', cfg.username);
+    const token = field(cfg.hasToken ? 'A token is saved. Paste a new one to replace it.' : 'Personal access token', '', { type: 'password' });
+    const save = async () => {
+      try {
+        await Git.setConfig({
+          name: name.value, email: email.value, host: host.value, username: user.value,
+          ...(token.value.trim() ? { token: token.value.trim() } : {}),
+        });
+        toast('Git settings saved');
+        app.rerender();
+      } catch (e) {
+        toast(`Could not save: ${gitErr(e)}`);
+      }
+    };
+    box.append(
+      h('div', { class: 'setting' }, h('div', { class: 'setting-label' }, 'Author'), h('div', { class: 'setting-hint' }, 'Used for your commits.'),
+        h('div', { class: 'inline' }, name, email)),
+      h('div', { class: 'setting' }, h('div', { class: 'setting-label' }, 'HTTPS access'),
+        h('div', { class: 'setting-hint' }, 'Needed to push, and to clone private repositories. On GitHub create a fine-grained token with "Contents: Read and write" for your repositories. The token is stored in the app\'s private storage, is never shown again, and is only sent to the host below.'),
+        h('div', { class: 'inline' }, host, user), h('div', { class: 'inline', style: 'margin-top:8px' }, token)),
+      h('a', { class: 'link', href: TOKEN_HELP, target: '_blank', rel: 'noopener' }, TOKEN_HELP),
+      h('div', { class: 'inline buttons' },
+        h('button', { class: 'btn', onclick: () => void save() }, 'Save Git settings'),
+        cfg.hasToken ? h('button', { class: 'btn secondary', onclick: () => void Git.setConfig({ token: '' }).then(() => { toast('Token removed'); app.rerender(); }) }, 'Remove token') : null,
+        h('button', { class: 'btn secondary', onclick: () => void app.cloneRepo() }, icon('repo-clone'), ' Clone repository')));
+  }).catch(() => {
+    box.textContent = 'Git is only available in the Android app.';
+  });
+  return box;
 }

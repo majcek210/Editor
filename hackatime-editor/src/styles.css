@@ -220,3 +220,22 @@ pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-bre
 .log-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .log-label { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-top: 6px; }
 .log-err { color: var(--error); }
+
+/* source control */
+.sidebar-title .grow { flex: 1; }
+.scm-empty { padding: 8px 20px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
+.scm-empty p { margin: 4px 0; }
+.scm-busy { padding: 4px 20px; color: var(--muted); }
+.commit-box { padding: 0 12px 8px 20px; display: flex; flex-direction: column; gap: 6px; }
+.commit-msg { resize: vertical; min-height: 44px; font-family: var(--ui); }
+.wide-btn { justify-content: center; width: 100%; }
+.scm-row { padding-left: 20px; }
+.scm-row .row-act { width: 26px; height: 24px; opacity: 0; }
+.scm-row:hover .row-act { opacity: 1; }
+@media (pointer: coarse) { .scm-row .row-act { opacity: 0.8; } }
+.scm-kind { width: 16px; text-align: center; font-weight: 600; font-size: 12px; flex: none; }
+.kind-modified { color: #e2c08d; }
+.kind-added, .kind-untracked { color: #73c991; }
+.kind-deleted { color: #c74e39; }
+.strike { text-decoration: line-through; }
+.status-item.branch span, .status-item.sync span { white-space: nowrap; }

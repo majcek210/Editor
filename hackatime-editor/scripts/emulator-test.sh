@@ -47,7 +47,8 @@ heartbeat() { # label env-prefix
   say ""
   say "## $1"
   say '```'
-  OUT=$(runas "rm -f $FILES/.wakatime/wakatime-internal.cfg; cd $FILES && env -i HOME=$FILES $2 $CLI --config $FILES/emu/test.cfg --entity $FILES/emu/test.txt --plugin hackatime-editor/0.1.0 --write --sync-ai-disabled --log-to-stdout; echo EXIT=\$?" 2>&1)
+  # The install path contains "==", which env would read as a variable, so run it as ./libwakatime.so.
+  OUT=$(runas "rm -f $FILES/.wakatime/wakatime-internal.cfg; cd $(dirname "$CLI") && env -i HOME=$FILES $2 ./libwakatime.so --config $FILES/emu/test.cfg --entity $FILES/emu/test.txt --plugin hackatime-editor/0.1.0 --write --sync-ai-disabled --log-to-stdout; echo EXIT=\$?" 2>&1)
   echo "$OUT" | sed "s/$FAKE_KEY/<redacted>/g" | tee -a "$REPORT"
   say '```'
 }
@@ -73,5 +74,15 @@ if [ -n "$NOCGO" ] && [ -f "$NOCGO" ]; then
   say '```'
   adb shell "cd /data/local/tmp/h && env -i HOME=/data/local/tmp/h /data/local/tmp/wakatime-nocgo --config t.cfg --entity /data/local/tmp/h/t.txt --plugin hackatime-editor/0.1.0 --sync-ai-disabled --log-to-stdout; echo EXIT=\$?" 2>&1 | sed "s/$FAKE_KEY/<redacted>/g" | tee -a "$REPORT"
   say '```'
+fi
+if [ -n "${TEST_APK:-}" ] && [ -f "$TEST_APK" ]; then
+  say ""
+  say "## JGit on device (clone https://github.com/octocat/Hello-World.git, stage, commit)"
+  say '```'
+  adb install -r "$TEST_APK" >/dev/null
+  INST=$(adb shell am instrument -w "$PKG.test/androidx.test.runner.AndroidJUnitRunner" 2>&1)
+  echo "$INST" | tail -15 | tee -a "$REPORT"
+  say '```'
+  echo "$INST" | grep -q "^OK (" || STATUS=1
 fi
 exit $STATUS

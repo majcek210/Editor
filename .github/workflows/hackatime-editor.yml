@@ -64,7 +64,7 @@ jobs:
 
       - name: Kotlin unit tests and debug APK
         working-directory: hackatime-editor/android
-        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest
 
       - name: Name the APK
         run: |
@@ -84,7 +84,9 @@ jobs:
       - uses: actions/upload-artifact@v5
         with:
           name: emulator-inputs
-          path: hackatime-editor/build/cli/wakatime-nocgo-x86_64
+          path: |
+            hackatime-editor/build/cli/wakatime-nocgo-x86_64
+            hackatime-editor/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
           retention-days: 3
 
   emulator-test:
@@ -120,7 +122,7 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
           working-directory: hackatime-editor
-          script: REPORT=out/emulator-report.md bash scripts/emulator-test.sh out/hackatime-editor-0.1.0-debug.apk out/wakatime-nocgo-x86_64
+          script: REPORT=out/emulator-report.md TEST_APK=out/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk bash scripts/emulator-test.sh out/hackatime-editor-0.1.0-debug.apk out/build/cli/wakatime-nocgo-x86_64
 
       - name: Report
         if: always()

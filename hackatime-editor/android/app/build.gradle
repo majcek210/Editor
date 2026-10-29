@@ -18,6 +18,9 @@ android {
         }
     }
     packaging {
+        resources {
+            excludes += ['META-INF/DEPENDENCIES', 'plugin.properties', 'about.html']
+        }
         // wakatime-cli ships as jniLibs/<abi>/libwakatime.so. It must be extracted
         // to nativeLibraryDir on install, because apps may not exec files from
         // their writable data dir (Android 10+).
@@ -48,8 +51,12 @@ dependencies {
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
     implementation project(':capacitor-android')
+    // Git support. 5.13.x is the last JGit line that targets Java 8, which Android runs.
+    implementation "org.eclipse.jgit:org.eclipse.jgit:5.13.3.202401111512-r"
     testImplementation "junit:junit:$junitVersion"
     testImplementation "org.json:json:20250517"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test:runner:1.6.2"
     implementation project(':capacitor-cordova-android-plugins')
 }
 

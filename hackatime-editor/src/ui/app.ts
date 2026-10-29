@@ -10,6 +10,8 @@ import { alertText, choose, promptText, toast } from './dialogs';
 import { closePalette, isPaletteOpen, showQuickPick, type QuickItem } from './palette';
 import { renderSettings } from './settingsPage';
 import { renderTrackingLog } from './logPage';
+import { ScmController } from './scmView';
+import { Git, errText, repoNameFromUrl, validCloneUrl } from '../native/git';
 import { CommandRegistry } from '../core/commands';
 import { activatePlugins, type ActiveFileInfo, type EditorPlugin, type PluginContext, type StatusItem } from '../core/plugins';
 import type { Tracker, TrackingState, FileActivity } from '../core/tracker/tracker';
@@ -17,7 +19,7 @@ import type { ActivityKind } from '../core/tracker/throttle';
 import type { Invocation } from '../native/wakacli';
 import { createState, fontConf, fontTheme, goToLine, insertText, isUserEdit, languageConf, redo, tabConf, tabExtensions, undo, wrapConf, type EditorPrefs } from '../editor/setup';
 import { LANGUAGES, detectLanguage, type LanguageDef } from '../editor/languages';
-import { Project, baseName, joinRel, listProjects, parentRel, validName, type Entry, type ProjectRef, type RootKind } from '../fs/project';
+import { Project, baseName, joinRel, listProjects, parentRel, validName, PROJECTS_DIR, type Entry, type ProjectRef, type RootKind } from '../fs/project';
 
 interface FileTab {
   kind: 'file';
@@ -36,6 +38,7 @@ interface PageTab {
 }
 
 type Tab = FileTab | PageTab;
+type SidebarView = 'explorer' | 'search' | 'scm';
 
 const DEFAULT_PREFS: EditorPrefs = { fontSize: 14, softWrap: false, tabSize: 4 };
 const MAX_OPEN_BYTES = 2 * 1024 * 1024;
@@ -51,7 +54,8 @@ export class EditorApp {
   private fileIndex: Entry[] | null = null;
   private expanded = new Set<string>(['']);
   private children = new Map<string, Entry[]>();
-  private sidebarView: 'explorer' | 'search' = 'explorer';
+  private sidebarView: SidebarView = 'explorer';
+  scm!: ScmController;
   private sidebarOpen = false;
   private wide = window.matchMedia(WIDE_QUERY);
   private statusItems: HTMLElement;
@@ -120,6 +124,7 @@ export class EditorApp {
     };
     addAct('explorer', 'files', 'Explorer', () => this.showSidebar('explorer'));
     addAct('search', 'search', 'Search', () => this.showSidebar('search'));
+    addAct('scm', 'source-control', 'Source Control', () => this.showSidebar('scm'));
     activity.append(h('div', { class: 'spacer' }));
     addAct('log', 'output', 'Tracking Log', () => this.openPage('log'));
     addAct('settings', 'settings-gear', 'Settings', () => this.openPage('settings'));
@@ -129,6 +134,7 @@ export class EditorApp {
     const drawerActs = h('div', { class: 'drawer-acts' },
       iconButton('files', 'Explorer', () => this.showSidebar('explorer')),
       iconButton('search', 'Search', () => this.showSidebar('search')),
+      iconButton('source-control', 'Source Control', () => this.showSidebar('scm')),
       iconButton('output', 'Tracking Log', () => this.openPage('log')),
       iconButton('settings-gear', 'Settings', () => this.openPage('settings')));
     this.sidebar = h('aside', { class: 'sidebar' }, drawerActs, this.sidebarBody);
@@ -152,11 +158,23 @@ export class EditorApp {
       encoding: st('encoding', 'Encoding'),
       language: st('language', 'Change Language Mode', () => this.pickLanguage()),
     };
+    const branchItem = h('button', { class: 'status-item branch', title: 'Checkout branch' });
+    const syncItem = h('button', { class: 'status-item sync', title: 'Synchronize changes' });
     this.statusBar = h('footer', { class: 'statusbar' },
-      h('div', { class: 'status-left' }, this.status.tracking, this.status.project),
+      h('div', { class: 'status-left' }, this.status.tracking, this.status.project, branchItem, syncItem),
       h('div', { class: 'status-right' }, this.statusItems, this.status.pos, this.status.indent, this.status.encoding, this.status.language));
 
     this.root.append(bar, h('div', { class: 'main' }, activity, this.sidebar, scrim, editorArea), this.kbBar, this.statusBar);
+
+    this.scm = new ScmController({
+      projectDir: () => this.projectDir(),
+      openFile: (rel) => void this.openFile(rel, true).catch(() => undefined),
+      filesChangedOnDisk: () => this.filesChangedOnDisk(),
+      renderScm: () => { if (this.sidebarView === 'scm') this.renderSidebar(); },
+      isScmVisible: () => this.sidebarView === 'scm' && this.sidebarOpen,
+      openSettings: () => this.openPage('settings'),
+    }, branchItem, syncItem);
+    document.addEventListener('git-clone', () => void this.cloneRepo());
 
     const listener = EditorView.updateListener.of((u) => this.onEditorUpdate(u));
     this.editorExtra = listener;
@@ -176,7 +194,10 @@ export class EditorApp {
     document.addEventListener('visibilitychange', () => this.tracker.throttle.setForeground(document.visibilityState === 'visible'));
     CapApp.addListener('appStateChange', ({ isActive }) => this.tracker.throttle.setForeground(isActive)).catch(() => undefined);
     CapApp.addListener('pause', () => this.tracker.throttle.setForeground(false)).catch(() => undefined);
-    CapApp.addListener('resume', () => this.tracker.throttle.setForeground(true)).catch(() => undefined);
+    CapApp.addListener('resume', () => {
+      this.tracker.throttle.setForeground(true);
+      void this.scm.refresh();
+    }).catch(() => undefined);
     CapApp.addListener('backButton', () => this.onBack()).catch(() => undefined);
 
     document.addEventListener('keydown', (e) => {
@@ -187,6 +208,7 @@ export class EditorApp {
       if (e.shiftKey && k === 'p') this.showCommands();
       else if (e.shiftKey && k === 'f') this.showSidebar('search');
       else if (e.shiftKey && k === 'e') this.showSidebar('explorer');
+      else if (e.shiftKey && k === 'g') this.showSidebar('scm');
       else if (!e.shiftKey && k === 'p') this.quickOpen();
       else if (!e.shiftKey && k === 's') void this.saveActive();
       else if (e.altKey && k === 's') void this.saveAll();
@@ -275,6 +297,17 @@ export class EditorApp {
     c('settings.open', 'Open Settings', () => this.openPage('settings'), 'Ctrl+,');
     c('tracking.showLog', 'Show Tracking Log', () => this.openPage('log'));
     c('tracking.test', 'Hackatime: Test Tracking', () => this.openPage('settings', true));
+    c('view.scm', 'Show Source Control', () => this.showSidebar('scm'), 'Ctrl+Shift+G');
+    c('git.clone', 'Git: Clone...', () => this.cloneRepo());
+    c('git.init', 'Git: Initialize Repository', () => this.scm.init());
+    c('git.commit', 'Git: Commit', () => this.scm.commit());
+    c('git.stageAll', 'Git: Stage All Changes', () => this.scm.stageAll());
+    c('git.push', 'Git: Push', () => this.scm.push());
+    c('git.pull', 'Git: Pull', () => this.scm.pull());
+    c('git.sync', 'Git: Sync', () => this.scm.sync());
+    c('git.checkout', 'Git: Checkout to...', () => this.scm.pickBranch());
+    c('git.addRemote', 'Git: Add Remote (origin)...', () => this.scm.addRemote());
+    c('git.log', 'Git: Show Commit Log', () => this.scm.showLog());
   }
 
   showCommands(): void {
@@ -301,6 +334,66 @@ export class EditorApp {
     await Preferences.set({ key: 'project', value: JSON.stringify(ref) });
     this.renderSidebar();
     this.renderStatus();
+    void this.scm.refresh();
+  }
+
+  /** Absolute path of the open project folder, for Git. */
+  projectDir(): string | null {
+    return this.project ? this.project.absPath('').replace(/\/$/, '') : null;
+  }
+
+  /** Called after Git changed files: reload unmodified tabs and the tree. */
+  async filesChangedOnDisk(): Promise<void> {
+    const p = this.project;
+    if (!p) return;
+    const skipped: string[] = [];
+    for (const t of [...this.tabs]) {
+      if (t.kind !== 'file' || t.binary) continue;
+      if (t.dirty) {
+        skipped.push(t.name);
+        continue;
+      }
+      let text: string;
+      try {
+        text = await p.read(t.rel);
+      } catch {
+        await this.closeTab(t); // the file no longer exists
+        continue;
+      }
+      const current = (this.active === t ? this.view.state : t.state).doc.toString();
+      if (text === current) continue;
+      // Replacing the document is not a user edit, so no heartbeat is sent.
+      t.state = createState(text, [], this.prefs, this.editorExtra);
+      if (this.active === t) this.view.setState(t.state);
+      void this.loadLanguage(t, t.lang);
+    }
+    if (skipped.length) toast(`Not reloaded (unsaved changes): ${skipped.join(', ')}`);
+    this.refreshTree();
+    this.renderStatus();
+  }
+
+  async cloneRepo(): Promise<void> {
+    const cfg = await Git.getConfig().catch(() => null);
+    const url = await promptText(`Repository URL${cfg?.hasToken ? '' : ' (public repos work without a token; private ones need a token in Settings)'}`, 'https://github.com/', validCloneUrl);
+    if (!url) return;
+    const name = await promptText('Folder name for the clone', repoNameFromUrl(url), validName);
+    if (!name) return;
+    const ref: ProjectRef = { root: 'EXTERNAL', path: `${PROJECTS_DIR}/${name.trim()}` };
+    if ((await listProjects('EXTERNAL')).includes(name.trim())) return alertText('Folder exists', `A project named ${name.trim()} already exists.`);
+    if (!(await this.confirmDiscard(this.tabs.filter(isDirtyFile)))) return;
+    const target = new Project(ref);
+    await target.init();
+    const dir = target.absPath('').replace(/\/$/, '');
+    toast(`Cloning ${repoNameFromUrl(url)}...`);
+    try {
+      await Git.clone({ dir, url: url.trim() });
+    } catch (e) {
+      await target.remove({ name: target.name, rel: '', type: 'directory', size: 0 }).catch(() => undefined);
+      return alertText('Clone failed', errText(e));
+    }
+    toast('Clone finished');
+    await this.switchProject(ref);
+    this.showSidebar('explorer');
   }
 
   private async pickProject(): Promise<void> {
@@ -480,6 +573,7 @@ export class EditorApp {
     tab.dirty = false;
     this.renderTabs();
     void this.track('save', tab);
+    if (this.scm.status?.repo) void this.scm.refresh();
     return true;
   }
 
@@ -620,7 +714,7 @@ export class EditorApp {
     this.setSidebar(!this.sidebarOpen);
   }
 
-  showSidebar(view: 'explorer' | 'search'): void {
+  showSidebar(view: SidebarView): void {
     if (this.sidebarOpen && this.sidebarView === view && this.wide.matches) {
       this.setSidebar(false);
       return;
@@ -628,12 +722,14 @@ export class EditorApp {
     this.sidebarView = view;
     this.setSidebar(true);
     this.renderSidebar();
+    if (view === 'scm') void this.scm.refresh();
     if (view === 'search') setTimeout(() => this.sidebarBody.querySelector<HTMLInputElement>('.search-input')?.focus(), 0);
   }
 
   private renderSidebar(): void {
     clear(this.sidebarBody);
     if (this.sidebarView === 'explorer') this.renderExplorer();
+    else if (this.sidebarView === 'scm') this.scm.render(this.sidebarBody);
     else this.renderSearch();
     this.renderActivity();
   }
@@ -682,6 +778,7 @@ export class EditorApp {
       this.children.set(rel, entries);
     }
     for (const e of entries) {
+      if (e.name === '.git') continue;
       const isDir = e.type === 'directory';
       const open = isDir && this.expanded.has(e.rel);
       const activeRel = this.activeFile()?.rel;
@@ -936,6 +1033,7 @@ export class EditorApp {
       link('Open File...', () => this.quickOpen()),
       link('New File...', () => void this.createEntry('file', '')),
       link('Open Folder...', () => void this.pickProject()),
+      link('Clone Git Repository...', () => void this.cloneRepo()),
       h('h3', {}, 'Hackatime'),
       link('Settings and API key', () => this.openPage('settings')),
       link('Tracking Log', () => this.openPage('log'))));
