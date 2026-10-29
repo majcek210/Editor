@@ -81,7 +81,7 @@ build_abi() { # abi goarch cc-prefix
   mkdir -p "$JNI/$abi"
   if [ -n "$TOOLCHAIN" ]; then
     cgo=1
-    ( cd "$SRC" && CGO_ENABLED=1 GOOS=android GOARCH="$goarch" ${GOARM:+GOARM=$GOARM} \
+    ( cd "$SRC" && env CGO_ENABLED=1 GOOS=android GOARCH="$goarch" GOARM="${GOARM:-}" \
         CC="$TOOLCHAIN/${ccprefix}${ANDROID_API}-clang" \
         go build -trimpath -buildvcs=false -ldflags "$LDFLAGS -X $REPO_PATH/pkg/version.Arch=$goarch" -o "$out" . )
   else

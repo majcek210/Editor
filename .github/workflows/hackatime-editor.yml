@@ -19,20 +19,20 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: hackatime-editor/package-lock.json
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: stable
           cache: false
@@ -72,7 +72,7 @@ jobs:
           sha256sum out/hackatime-editor-0.1.0-debug.apk | tee out/SHA256SUMS
           unzip -l out/hackatime-editor-0.1.0-debug.apk | grep libwakatime
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: hackatime-editor-debug-apk
           path: |
@@ -80,7 +80,7 @@ jobs:
             hackatime-editor/out/SHA256SUMS
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: emulator-inputs
           path: hackatime-editor/build/cli/wakatime-nocgo-x86_64
@@ -91,14 +91,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: hackatime-editor-debug-apk
           path: hackatime-editor/out
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: emulator-inputs
           path: hackatime-editor/out
@@ -125,7 +125,7 @@ jobs:
         if: always()
         run: cat out/emulator-report.md >> "$GITHUB_STEP_SUMMARY" || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: emulator-report
