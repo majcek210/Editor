@@ -29,6 +29,8 @@ export interface KeyValueStore {
 }
 
 const VERIFIED_KEY = 'tracking.verified';
+/** Message the native plugin rejects with while the app is paused. */
+export const BACKGROUND_REFUSAL = 'app is in the background';
 
 export class Tracker {
   readonly throttle: ActivityThrottle;
@@ -146,9 +148,12 @@ export class Tracker {
    */
   async record(kind: ActivityKind, file: FileActivity): Promise<Invocation | null> {
     if (!this.state.on || !this.info) return null;
+    // One CLI process at a time. Edits that arrive meanwhile are dropped (not
+    // queued) and do not use up the file's 30 s window. Saves still go through;
+    // the native side runs them after the current process.
+    if (this.inFlight && kind !== 'save') return null;
     const d = this.throttle.decide(kind, file.path);
     if (!d.send) return null;
-    if (this.inFlight && !d.write) return null;
 
     const args = buildHeartbeatArgs({
       entity: file.path,
@@ -161,6 +166,11 @@ export class Tracker {
       linesInFile: file.lines,
     });
     const inv = await this.invoke(args, kind);
+    if (inv.exitCode === null && inv.error?.includes(BACKGROUND_REFUSAL)) {
+      // The app went to the background before the call reached native code.
+      // Nothing ran; this is not a CLI failure.
+      return null;
+    }
     if (inv.exitCode === 0) {
       this.set({ on: true, lastOkAt: this.now(), cliLastSentAt: await this.lastSentAt() });
     } else {

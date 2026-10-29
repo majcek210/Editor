@@ -124,4 +124,30 @@ describe('Tracker', () => {
     const t = new Tracker(f.cli, memStore());
     expect((await t.init()).on).toBe(false);
   });
+
+  it('drops edits while a CLI run is in flight without using up the window', async () => {
+    const f = fakeCli();
+    let release!: () => void;
+    const orig = f.cli.heartbeat;
+    f.cli.heartbeat = (o) => new Promise((res) => { release = () => res(orig(o)); });
+    const t = new Tracker(f.cli, memStore());
+    await t.init();
+    t.throttle.noteUserInput();
+    const first = t.record('edit', { path: '/p/a.ts' });
+    expect(await t.record('edit', { path: '/p/b.ts' })).toBeNull();
+    release();
+    await first;
+    f.cli.heartbeat = orig;
+    expect(await t.record('edit', { path: '/p/b.ts' })).not.toBeNull();
+  });
+
+  it('ignores a native background refusal instead of turning tracking off', async () => {
+    const f = fakeCli();
+    f.cli.heartbeat = async () => { throw new Error('refused: app is in the background'); };
+    const t = new Tracker(f.cli, memStore());
+    await t.init();
+    t.throttle.noteUserInput();
+    await t.record('edit', { path: '/p/a.ts' });
+    expect(t.getState().on).toBe(true);
+  });
 });
