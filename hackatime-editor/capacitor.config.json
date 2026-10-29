@@ -1,0 +1,8 @@
+{
+  "appId": "io.github.majcek210.hackatimeeditor",
+  "appName": "Hackatime Editor",
+  "webDir": "dist",
+  "android": {
+    "allowMixedContent": false
+  }
+}

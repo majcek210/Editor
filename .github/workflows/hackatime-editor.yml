@@ -1,0 +1,132 @@
+name: hackatime-editor
+
+on:
+  push:
+    paths:
+      - 'hackatime-editor/**'
+      - '.github/workflows/hackatime-editor.yml'
+  pull_request:
+    paths:
+      - 'hackatime-editor/**'
+      - '.github/workflows/hackatime-editor.yml'
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: hackatime-editor
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: hackatime-editor/package-lock.json
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache: false
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Unit tests (Vitest)
+        run: npm test
+
+      - name: Build web app
+        run: npm run build
+
+      - name: Build wakatime-cli for Android (NDK, cgo)
+        run: |
+          echo "NDK: $ANDROID_NDK_LATEST_HOME"
+          ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME" scripts/build-cli.sh
+          file android/app/src/main/jniLibs/*/libwakatime.so
+          readelf -l android/app/src/main/jniLibs/arm64-v8a/libwakatime.so | grep -i interpreter
+          cat android/app/src/main/assets/wakatime-cli-build.json
+
+      - name: Build pure Go x86_64 binary for the emulator comparison
+        working-directory: hackatime-editor/build/cli/wakatime-cli
+        run: CGO_ENABLED=0 GOOS=android GOARCH=amd64 GOTOOLCHAIN=auto go build -trimpath -ldflags "-s -w" -o ../wakatime-nocgo-x86_64 .
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - name: Kotlin unit tests and debug APK
+        working-directory: hackatime-editor/android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+
+      - name: Name the APK
+        run: |
+          mkdir -p out
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/hackatime-editor-0.1.0-debug.apk
+          sha256sum out/hackatime-editor-0.1.0-debug.apk | tee out/SHA256SUMS
+          unzip -l out/hackatime-editor-0.1.0-debug.apk | grep libwakatime
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hackatime-editor-debug-apk
+          path: |
+            hackatime-editor/out/hackatime-editor-0.1.0-debug.apk
+            hackatime-editor/out/SHA256SUMS
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emulator-inputs
+          path: hackatime-editor/build/cli/wakatime-nocgo-x86_64
+          retention-days: 3
+
+  emulator-test:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hackatime-editor-debug-apk
+          path: hackatime-editor/out
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: emulator-inputs
+          path: hackatime-editor/out
+
+      - name: Enable KVM
+        working-directory: .
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Run wakatime-cli on an Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          arch: x86_64
+          target: google_apis
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot -noaudio -no-boot-anim -gpu swiftshader_indirect
+          working-directory: hackatime-editor
+          script: REPORT=out/emulator-report.md bash scripts/emulator-test.sh out/hackatime-editor-0.1.0-debug.apk out/wakatime-nocgo-x86_64
+
+      - name: Report
+        if: always()
+        run: cat out/emulator-report.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: emulator-report
+          path: hackatime-editor/out/emulator-report.md
