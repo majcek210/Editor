@@ -64,7 +64,7 @@ jobs:
 
       - name: Kotlin unit tests and debug APK
         working-directory: hackatime-editor/android
-        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleDebugAndroidTest
+        run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest
 
       - name: Name the APK
         run: |
