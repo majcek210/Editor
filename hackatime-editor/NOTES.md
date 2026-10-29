@@ -135,6 +135,8 @@ and runs from `ApplicationInfo.nativeLibraryDir`.
   "DNS requests don't work on Android, so prefer the cgo resolver"), which
   calls bionic `getaddrinfo` and therefore Android's own DNS (netd, private
   DNS, VPNs). That only exists when cgo is enabled, which needs the NDK.
+- Go only allows `CGO_ENABLED=0` for android/arm64; android/arm and
+  android/amd64 fail with "requires external (cgo) linking" (seen in CI).
 - Upstream's own `build-android-arm64` target uses `CGO_ENABLED=0`
   (`Makefile:6` and `48-49`); only android/arm forces cgo (42-46).
 - wakatime-cli's DNS fallback to a hard-coded IP only applies to

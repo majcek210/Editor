@@ -56,7 +56,8 @@ jobs:
 
       - name: Build pure Go x86_64 binary for the emulator comparison
         working-directory: hackatime-editor/build/cli/wakatime-cli
-        run: CGO_ENABLED=0 GOOS=android GOARCH=amd64 GOTOOLCHAIN=auto go build -trimpath -ldflags "-s -w" -o ../wakatime-nocgo-x86_64 .
+        # Go refuses GOOS=android/amd64 without cgo, so use GOOS=linux (same pure Go resolver).
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOTOOLCHAIN=auto go build -trimpath -ldflags "-s -w" -o ../wakatime-nocgo-x86_64 .
 
       - name: Sync Capacitor
         run: npx cap sync android
