@@ -48,7 +48,7 @@ heartbeat() { # label env-prefix
   say "## $1"
   say '```'
   # The install path contains "==", which env would read as a variable, so run it as ./libwakatime.so.
-  OUT=$(runas "rm -f $FILES/.wakatime/wakatime-internal.cfg; cd $(dirname "$CLI") && env -i HOME=$FILES $2 ./libwakatime.so --config $FILES/emu/test.cfg --entity $FILES/emu/test.txt --plugin hackatime-editor/0.1.0 --write --sync-ai-disabled --log-to-stdout; echo EXIT=\$?" 2>&1)
+  OUT=$(runas "rm -f $FILES/.wakatime/wakatime-internal.cfg; cd $(dirname "$CLI") && env -i HOME=$FILES TMPDIR=$FILES/emu $2 ./libwakatime.so --config $FILES/emu/test.cfg --entity $FILES/emu/test.txt --plugin hackatime-editor/0.1.0 --write --sync-ai-disabled --log-to-stdout; echo EXIT=\$?" 2>&1)
   echo "$OUT" | sed "s/$FAKE_KEY/<redacted>/g" | tee -a "$REPORT"
   say '```'
 }

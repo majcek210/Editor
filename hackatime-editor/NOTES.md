@@ -163,6 +163,26 @@ build for comparison.
   it to `files/wakatime/cacert.pem` and sets `SSL_CERT_FILE`. That works for
   both `GOOS=android` and `GOOS=linux` builds.
 
+### Results on an Android emulator (CI, API 34, x86_64)
+
+From the `emulator-test` job (run 40926984182):
+
+- `libwakatime.so` runs from `nativeLibraryDir` as the app's uid (`--version`
+  prints `v2.28.0`).
+- cgo build, with `SSL_CERT_FILE` set to the bundled Mozilla CA file: the
+  heartbeat reached `hackatime.hackclub.com` and was rejected with
+  "authentication failed" (exit 104) for the unknown test key. The same with
+  only the system CA store. So exec, DNS and TLS all work.
+- Pure Go build (`CGO_ENABLED=0`): `lookup hackatime.hackclub.com on
+  [::1]:53: read: connection refused`, exit 102.
+- JGit cloned https://github.com/octocat/Hello-World.git and committed on the
+  device.
+- Without `TMPDIR` the CLI cannot take its config lock
+  (`/data/local/tmp/juju-wakatime-cli-config-mutex: permission denied`), so it
+  cannot save its rate-limit and backoff state. Go's `os.TempDir()` is
+  `/data/local/tmp` on Android unless `TMPDIR` is set. The plugin sets
+  `TMPDIR` to the app's cache dir.
+
 ## 7. Differences from the task's assumptions
 
 - `https://hackatime.hackclub.com/my/wakatime_setup` now redirects to `/setup`
@@ -190,5 +210,6 @@ Google's Maven repository) or `hackatime.hackclub.com`. So:
 
 - The APK is built by GitHub Actions, not locally.
 - Android behaviour of the CLI is checked by the CI emulator job (x86_64,
-  API 34), not on a physical arm64 phone.
+  API 34), not on a physical arm64 phone. The arm64 binary is built the same
+  way but was not run.
 - No real heartbeat with a real key was sent from this environment.
