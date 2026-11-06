@@ -7,6 +7,7 @@
 import type { Extension, EditorState } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
 import { syntaxTree } from '@codemirror/language';
+import { suggestMembers } from './javaMembers';
 import {
   completeAnyWord, snippetCompletion, type Completion, type CompletionContext, type CompletionResult,
 } from '@codemirror/autocomplete';
@@ -194,10 +195,17 @@ export interface JavaSymbol {
   line: number;
   /** Enclosing type, if any. */
   container?: string;
+  /** Field type or method return type, as written (generics included). */
+  type?: string;
+  /** Method parameter list as written, without parentheses. */
+  params?: string;
+  isStatic?: boolean;
+  /** For types: names after extends / implements. */
+  supers?: string[];
 }
 
 const TYPE_RE = /\b(class|interface|enum|record|@interface)\s+([A-Za-z_$][\w$]*)/;
-const METHOD_RE = /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*>\s*)?([\w$.<>,?\[\] ]+?)\s+([A-Za-z_$][\w$]*)\s*\([^;]*$/;
+const METHOD_RE = /^\s*(?:@\w+(?:\([^)]*\))?\s*)*(?:(?:public|protected|private|static|final|abstract|synchronized|native|default|strictfp)\s+)*(?:<[^>]*>\s*)?([\w$.<>,?\[\] ]+?)\s+([A-Za-z_$][\w$]*)\s*\([^)]*(?:\)\s*(?:throws\s+[\w$.,\s]+?)?\s*(?:\{.*|;\s*)?)?$/;
 const CTOR_RE = /^\s*(?:(?:public|protected|private)\s+)([A-Z][\w$]*)\s*\(/;
 const FIELD_RE = /^\s*(?:(?:public|protected|private|static|final|transient|volatile)\s+)+([\w$.<>,?\[\] ]+?)\s+([A-Za-z_$][\w$]*)\s*(?:=|;)/;
 const NOT_METHOD = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'new', 'else', 'throw', 'synchronized', 'try', 'do']);
@@ -231,17 +239,23 @@ export function javaSymbols(src: string): JavaSymbol[] {
     const t = TYPE_RE.exec(line);
     if (t) {
       const kind = t[1] === '@interface' ? 'annotation' : (t[1] as JavaSymbol['kind']);
-      out.push({ name: t[2], kind, line: i + 1, container });
+      const decl = line.slice(t.index + t[0].length);
+      const supers = [...decl.matchAll(/\b(?:extends|implements)\s+([^{]+)/g)]
+        .flatMap((m) => m[1].split(',').map((x) => x.trim().replace(/<.*$/, '').replace(/\b(?:implements|extends)\b.*/, '').trim()))
+        .filter(Boolean);
+      out.push({ name: t[2], kind, line: i + 1, container, supers });
       stack.push({ name: t[2], depth: depth + 1 });
     } else if (container && stack[stack.length - 1].depth === depth) {
       const c = CTOR_RE.exec(line);
       const m = METHOD_RE.exec(line);
       const f = FIELD_RE.exec(line);
-      if (c && c[1] === container) out.push({ name: c[1], kind: 'method', line: i + 1, container });
+      const isStatic = /\bstatic\b/.test(line);
+      const params = /\(([^)]*)\)?/.exec(line)?.[1]?.trim() ?? '';
+      if (c && c[1] === container) out.push({ name: c[1], kind: 'method', line: i + 1, container, params });
       else if (m && !NOT_METHOD.has(m[2]) && !NOT_METHOD.has(m[1].trim()) && m[1].trim() !== 'new') {
-        out.push({ name: m[2], kind: 'method', line: i + 1, container });
+        out.push({ name: m[2], kind: 'method', line: i + 1, container, type: m[1].trim(), params, isStatic });
       } else if (f && !NOT_METHOD.has(f[1].trim()) && f[1].trim() !== 'return') {
-        out.push({ name: f[2], kind: 'field', line: i + 1, container });
+        out.push({ name: f[2], kind: 'field', line: i + 1, container, type: f[1].trim(), isStatic });
       }
     }
     for (const ch of line) {
@@ -264,14 +278,31 @@ export interface ClassEntry {
   rel: string;
   line: number;
   kind: JavaSymbol['kind'];
+  members?: Member[];
+  supers?: string[];
 }
 
-/** Top-level and nested types declared in one file. */
+/** A method or field that can be suggested after a dot. */
+export interface Member {
+  name: string;
+  kind: 'method' | 'field';
+  /** Return or field type, generics stripped where possible. */
+  type: string;
+  params: string;
+  isStatic: boolean;
+}
+
+/** Top-level and nested types declared in one file, with their members. */
 export function classesInFile(rel: string, src: string): ClassEntry[] {
   const pkg = /^\s*package\s+([\w.]+)\s*;/m.exec(src)?.[1] ?? '';
-  return javaSymbols(src)
+  const syms = javaSymbols(src);
+  return syms
     .filter((s) => s.kind !== 'method' && s.kind !== 'field')
-    .map((s) => ({ name: s.name, pkg, rel, line: s.line, kind: s.kind }));
+    .map((s) => ({
+      name: s.name, pkg, rel, line: s.line, kind: s.kind, supers: s.supers,
+      members: syms.filter((m) => m.container === s.name && (m.kind === 'method' || m.kind === 'field') && m.name !== s.name)
+        .map((m) => ({ name: m.name, kind: m.kind as 'method' | 'field', type: m.type ?? '', params: m.params ?? '', isStatic: !!m.isStatic })),
+    }));
 }
 
 /** Project classes known to completion. Updated by the app. */
@@ -319,9 +350,54 @@ function dedupeSorted(changes: { from: number; to?: number; insert: string }[]) 
   return changes.sort((a, b) => a.from - b.from || (a.to ?? a.from) - (b.to ?? b.from));
 }
 
+/** Suggestions after a dot: members of the receiver's type, when it can be worked out. */
+function memberCompletions(ctx: CompletionContext): CompletionResult | null {
+  const dotted = ctx.matchBefore(/\.\s*[\w$]*/);
+  if (!dotted) return null;
+  const lineText = ctx.state.doc.lineAt(ctx.pos).text;
+  if (/^\s*(package|import)\b/.test(lineText)) return null;
+  const src = ctx.state.doc.toString();
+  const cursorLine = ctx.state.doc.lineAt(ctx.pos).number;
+  const local = classesInFile('', src);
+  let currentClass: string | undefined;
+  for (const sym of javaSymbols(src)) if (sym.kind !== 'method' && sym.kind !== 'field' && sym.line <= cursorLine) currentClass = sym.name;
+  const names = new Set(local.map((c) => c.name));
+  const classes = [...local, ...allProjectClasses().filter((c) => !names.has(c.name))];
+  const found = suggestMembers({ src, pos: dotted.from, currentClass, classes });
+  if (!found) return null;
+  const word = /[\w$]*$/.exec(dotted.text)![0];
+  const seen = new Set<string>();
+  const options: Completion[] = [];
+  for (const m of found.members) {
+    const key = `${m.kind}:${m.name}`;
+    if (seen.has(key)) continue; // overloads: show once
+    seen.add(key);
+    if (m.kind === 'field') {
+      options.push({ label: m.name, type: m.isStatic ? 'constant' : 'property', detail: m.type, boost: 2 });
+    } else {
+      const insert = `${m.name}()`;
+      options.push({
+        label: m.name, type: 'method', detail: `(${m.params}): ${m.type}`, boost: 1,
+        apply: (view: EditorView, _c: Completion, from: number, to: number) => {
+          view.dispatch({
+            changes: { from, to, insert },
+            selection: { anchor: from + insert.length - (m.params ? 1 : 0) },
+            userEvent: 'input.complete',
+          });
+        },
+      });
+    }
+  }
+  return { from: ctx.pos - word.length, options, validFor: /^[\w$]*$/ };
+}
+
 export function javaCompletionSource(ctx: CompletionContext): CompletionResult | null {
   const node = syntaxTree(ctx.state).resolveInner(ctx.pos, -1);
   if (SKIP_NODES.test(node.name)) return null;
+  const members = memberCompletions(ctx);
+  if (members) return members;
+  // After a dot with an unknown receiver, do not offer keywords and types.
+  if (ctx.matchBefore(/\.\s*[\w$]*/)) return null;
   const word = ctx.matchBefore(/@?[\w$]+/);
   if (!word || (word.from === word.to && !ctx.explicit)) return null;
   if (word.text.length < 2 && !ctx.explicit) return null;

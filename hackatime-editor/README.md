@@ -157,6 +157,15 @@ GitHub; everything else works in the editor:
 - **Completion** for Java keywords, common JDK types, Fabric/Mixin/SLF4J
   types and your project's own classes. Picking a type adds its `import`
   (sorted, skipped for `java.lang`, the same package or wildcard imports).
+- **Suggestions after a dot**: `names.`, `this.`, `LOGGER.`, `Math.`,
+  `System.out.`, `s.trim().` and so on list the methods and fields of the
+  receiver's type. Works for your project's classes (including members
+  inherited from your other classes) and for common JDK types (String,
+  List/Set/Map and their implementations, Optional, Stream, StringBuilder,
+  Math, System, Objects, Arrays, Collections, Integer, UUID), the SLF4J
+  Logger and Mixin's CallbackInfo. On a class name only static members are
+  shown. The type is found from declarations in the file (fields, locals,
+  parameters, `var x = new Type()`), so it can miss in complicated cases.
 - **Snippets**: `main`, `sout`, `fori`, `foreach`, `if`, `ifelse`, `while`,
   `trycatch`, `switch`, `override`, `logger` (SLF4J, adds imports) and
   `inject` (Mixin `@Inject` at HEAD, adds imports).
@@ -177,8 +186,10 @@ GitHub; everything else works in the editor:
   run's Artifacts.
 
 Completion and symbols are regex and syntax-tree based, not a full Java
-compiler: there are no type errors, no completion of methods after a `.`, and
-no Minecraft class names (they depend on your mappings). Use the build on
+compiler: there are no type errors, generic element types are not tracked
+(`list.get(0).` gives nothing), and Minecraft's own classes are not known
+(their names depend on your mappings), so `player.` on a Minecraft type
+gives no suggestions. Use the build on
 GitHub to check that the mod compiles.
 
 ## Editing on a phone
