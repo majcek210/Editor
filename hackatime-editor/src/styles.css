@@ -239,3 +239,22 @@ pre { font-family: var(--mono); font-size: 12px; white-space: pre-wrap; word-bre
 .kind-deleted { color: #c74e39; }
 .strike { text-decoration: line-through; }
 .status-item.branch span, .status-item.sync span { white-space: nowrap; }
+
+/* breadcrumbs */
+.breadcrumbs { height: 24px; flex: none; display: flex; align-items: center; gap: 2px; padding: 0 8px; background: var(--bg); color: #a9a9a9; font-size: 12px; overflow-x: auto; white-space: nowrap; scrollbar-width: none; border-bottom: 1px solid #252526; }
+.breadcrumbs::-webkit-scrollbar { display: none; }
+.crumb { display: inline-flex; align-items: center; gap: 4px; padding: 0 3px; height: 22px; color: inherit; font-size: 12px; border-radius: 3px; flex: none; }
+.crumb:hover, .crumb:active { color: #fff; background: rgba(90, 93, 94, 0.31); }
+.crumb .codicon, .crumb-icon { font-size: 14px; }
+.crumb.symbol .codicon { color: #b180d7; }
+.crumb-sep { font-size: 12px; opacity: 0.6; flex: none; }
+
+/* keyboard toolbar extras */
+.kb-sep { width: 1px; flex: none; background: #555; margin: 8px 2px; }
+.kb-key .codicon { font-size: 16px; }
+
+/* status bar text variants */
+.status-item .short { display: none; }
+@media (max-width: 600px) { .status-item .long { display: none; } .status-item .short { display: inline; } }
+
+.tab .file-icon, .tab-icon { font-size: 14px; }

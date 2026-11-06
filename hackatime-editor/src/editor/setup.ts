@@ -15,6 +15,8 @@ export interface EditorPrefs {
   fontSize: number;
   softWrap: boolean;
   tabSize: number;
+  /** Save a file automatically 1.5 s after the last edit. Autosaves send no heartbeat. */
+  autoSave: boolean;
 }
 
 export const languageConf = new Compartment();

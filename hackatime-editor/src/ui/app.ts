@@ -1,7 +1,8 @@
 import { EditorView, type ViewUpdate } from '@codemirror/view';
 import type { EditorState } from '@codemirror/state';
 import { openSearchPanel, closeSearchPanel, searchPanelOpen, selectNextOccurrence } from '@codemirror/search';
-import { cursorCharLeft, cursorCharRight, cursorLineDown, cursorLineUp } from '@codemirror/commands';
+import { cursorCharLeft, cursorCharRight, cursorLineBoundaryBackward, cursorLineBoundaryForward, cursorLineDown, cursorLineUp, indentLess, indentMore, toggleComment } from '@codemirror/commands';
+import { insertBracket } from '@codemirror/autocomplete';
 import { Preferences } from '@capacitor/preferences';
 import { App as CapApp } from '@capacitor/app';
 
@@ -10,6 +11,8 @@ import { alertText, choose, promptText, toast } from './dialogs';
 import { closePalette, isPaletteOpen, showQuickPick, type QuickItem } from './palette';
 import { renderSettings } from './settingsPage';
 import { renderTrackingLog } from './logPage';
+import { fileIcon } from './fileIcons';
+import { allProjectClasses, classesInFile, clearProjectClasses, javaSymbols, javaTemplate, packageForDir, setProjectFileClasses, validJavaName, type JavaKind, type JavaSymbol } from '../editor/java';
 import { ScmController } from './scmView';
 import { Git, errText, repoNameFromUrl, validCloneUrl } from '../native/git';
 import { CommandRegistry } from '../core/commands';
@@ -18,7 +21,7 @@ import type { Tracker, TrackingState, FileActivity } from '../core/tracker/track
 import type { ActivityKind } from '../core/tracker/throttle';
 import type { Invocation } from '../native/wakacli';
 import { createState, fontConf, fontTheme, goToLine, insertText, isUserEdit, languageConf, redo, tabConf, tabExtensions, undo, wrapConf, type EditorPrefs } from '../editor/setup';
-import { LANGUAGES, detectLanguage, type LanguageDef } from '../editor/languages';
+import { LANGUAGES, cliLanguageOf, detectLanguage, type LanguageDef } from '../editor/languages';
 import { Project, baseName, joinRel, listProjects, parentRel, validName, PROJECTS_DIR, type Entry, type ProjectRef, type RootKind } from '../fs/project';
 
 interface FileTab {
@@ -40,7 +43,9 @@ interface PageTab {
 type Tab = FileTab | PageTab;
 type SidebarView = 'explorer' | 'search' | 'scm';
 
-const DEFAULT_PREFS: EditorPrefs = { fontSize: 14, softWrap: false, tabSize: 4 };
+const DEFAULT_PREFS: EditorPrefs = { fontSize: 14, softWrap: false, tabSize: 4, autoSave: false };
+const MAX_RECENT = 30;
+const MAX_CURSORS = 300;
 const MAX_OPEN_BYTES = 2 * 1024 * 1024;
 const WIDE_QUERY = '(min-width: 900px), (orientation: landscape) and (min-width: 640px)';
 
@@ -63,6 +68,14 @@ export class EditorApp {
   private docListeners = new Set<(f: ActiveFileInfo) => void>();
   private trackingState: TrackingState = { on: false, reason: 'starting' };
   private lastSearch = { query: '', regex: false, caseSensitive: false, wholeWord: false };
+  /** Recently opened files (project-relative), newest first. */
+  private recent: string[] = [];
+  /** Last cursor position per file, restored when it is opened again. */
+  private cursors: Record<string, number> = {};
+  private autoSaveTimer: number | undefined;
+  private breadcrumbs!: HTMLElement;
+  private symbolCache: { doc: unknown; symbols: JavaSymbol[] } | null = null;
+  private javaIndexed: Project | null = null;
 
   // layout
   private root: HTMLElement;
@@ -87,6 +100,11 @@ export class EditorApp {
   async start(plugins: EditorPlugin[]): Promise<void> {
     const saved = await Preferences.get({ key: 'prefs' });
     if (saved.value) this.prefs = { ...DEFAULT_PREFS, ...JSON.parse(saved.value) };
+    try {
+      this.cursors = JSON.parse((await Preferences.get({ key: 'cursors' })).value ?? '{}');
+    } catch {
+      this.cursors = {};
+    }
     this.buildLayout();
     this.registerCommands();
     this.bindGlobalEvents();
@@ -144,7 +162,8 @@ export class EditorApp {
     this.editorHost = h('div', { class: 'editor-host' });
     this.pageHost = h('div', { class: 'page-host' });
     this.welcome = h('div', { class: 'welcome' });
-    const editorArea = h('section', { class: 'editor-area' }, this.tabBar, this.editorHost, this.pageHost, this.welcome);
+    this.breadcrumbs = h('div', { class: 'breadcrumbs' });
+    const editorArea = h('section', { class: 'editor-area' }, this.tabBar, this.breadcrumbs, this.editorHost, this.pageHost, this.welcome);
 
     this.kbBar = this.keyboardBar();
 
@@ -193,7 +212,12 @@ export class EditorApp {
     }
     document.addEventListener('visibilitychange', () => this.tracker.throttle.setForeground(document.visibilityState === 'visible'));
     CapApp.addListener('appStateChange', ({ isActive }) => this.tracker.throttle.setForeground(isActive)).catch(() => undefined);
-    CapApp.addListener('pause', () => this.tracker.throttle.setForeground(false)).catch(() => undefined);
+    CapApp.addListener('pause', () => {
+      this.tracker.throttle.setForeground(false);
+      const t = this.activeFile();
+      if (t) this.rememberCursor(t);
+      if (this.prefs.autoSave) for (const tab of this.tabs) if (isDirtyFile(tab)) void this.save(tab, true);
+    }).catch(() => undefined);
     CapApp.addListener('resume', () => {
       this.tracker.throttle.setForeground(true);
       void this.scm.refresh();
@@ -214,6 +238,9 @@ export class EditorApp {
       else if (e.altKey && k === 's') void this.saveAll();
       else if (!e.shiftKey && k === 'w') void this.closeTab(this.active);
       else if (!e.shiftKey && k === 'g') this.promptGoToLine();
+      else if (e.shiftKey && k === 'o') this.gotoSymbolInFile();
+      else if (!e.shiftKey && k === 't') this.gotoWorkspaceSymbol();
+      else if (!e.shiftKey && k === 'r') this.openRecent();
       else if (!e.shiftKey && k === 'b') this.toggleSidebar();
       else if (k === ',') this.openPage('settings');
       else handled = false;
@@ -224,6 +251,7 @@ export class EditorApp {
     }, { capture: true });
 
     this.wide.addEventListener('change', () => this.layout());
+    this.bindGestures();
     window.visualViewport?.addEventListener('resize', () => this.updateKeyboardBar());
     this.view.contentDOM.addEventListener('focus', () => this.updateKeyboardBar());
     this.view.contentDOM.addEventListener('blur', () => setTimeout(() => this.updateKeyboardBar(), 50));
@@ -308,6 +336,14 @@ export class EditorApp {
     c('git.checkout', 'Git: Checkout to...', () => this.scm.pickBranch());
     c('git.addRemote', 'Git: Add Remote (origin)...', () => this.scm.addRemote());
     c('git.log', 'Git: Show Commit Log', () => this.scm.showLog());
+    c('editor.toggleComment', 'Toggle Line Comment', () => { if (this.activeFile()) { toggleComment(this.view); this.view.focus(); } }, 'Ctrl+/');
+    c('editor.gotoSymbol', 'Go to Symbol in File...', () => this.gotoSymbolInFile(), 'Ctrl+Shift+O');
+    c('workbench.gotoWorkspaceSymbol', 'Go to Class in Project...', () => this.gotoWorkspaceSymbol(), 'Ctrl+T');
+    c('editor.toggleAutoSave', 'Toggle Auto Save', () => this.setPrefs({ autoSave: !this.prefs.autoSave }).then(() => toast(`Auto save ${this.prefs.autoSave ? 'on' : 'off'}`)));
+    c('tab.closeOthers', 'Close Other Tabs', () => this.closeOthers(this.active));
+    c('tab.reopenRecent', 'Open Recent File...', () => this.openRecent(), 'Ctrl+R');
+    c('java.newClass', 'Java: New Class...', () => this.newJavaClass(this.currentDir()));
+    c('java.addGradleBuild', 'Java: Add GitHub Actions Build (Gradle)', () => this.addGradleWorkflow());
   }
 
   showCommands(): void {
@@ -329,6 +365,13 @@ export class EditorApp {
     }
     this.project = p;
     this.fileIndex = null;
+    clearProjectClasses();
+    this.javaIndexed = null;
+    try {
+      this.recent = JSON.parse((await Preferences.get({ key: `recent:${ref.root}:${ref.path}` })).value ?? '[]');
+    } catch {
+      this.recent = [];
+    }
     this.children.clear();
     this.expanded = new Set(['']);
     await Preferences.set({ key: 'project', value: JSON.stringify(ref) });
@@ -447,6 +490,7 @@ export class EditorApp {
   async openFile(rel: string, userInitiated: boolean, line?: number, col?: number): Promise<void> {
     if (!this.project) return;
     let tab = this.tabs.find((t): t is FileTab => t.kind === 'file' && t.rel === rel);
+    const created = !tab;
     if (!tab) {
       const lang = detectLanguage(rel);
       let text = '';
@@ -467,9 +511,65 @@ export class EditorApp {
     }
     this.activate(tab);
     if (line) goToLine(this.view, line, col);
+    else if (created) this.restoreCursor(tab);
     if (!this.wide.matches) this.setSidebar(false);
     this.persistTabs();
+    this.noteRecent(rel);
+    this.revealInTree(rel);
+    if (tab.lang.id === 'java') void this.indexJava();
     if (userInitiated) void this.track('open', tab);
+  }
+
+  private restoreCursor(tab: FileTab): void {
+    const pos = this.cursors[tab.rel];
+    if (pos === undefined || this.active !== tab) return;
+    const at = Math.min(pos, this.view.state.doc.length);
+    this.view.dispatch({ selection: { anchor: at }, effects: EditorView.scrollIntoView(at, { y: 'center' }) });
+  }
+
+  private rememberCursor(tab: FileTab): void {
+    const state = this.active === tab ? this.view.state : tab.state;
+    delete this.cursors[tab.rel];
+    this.cursors[tab.rel] = state.selection.main.head;
+    const keys = Object.keys(this.cursors);
+    if (keys.length > MAX_CURSORS) for (const k of keys.slice(0, keys.length - MAX_CURSORS)) delete this.cursors[k];
+    void Preferences.set({ key: 'cursors', value: JSON.stringify(this.cursors) });
+  }
+
+  private noteRecent(rel: string): void {
+    this.recent = [rel, ...this.recent.filter((r) => r !== rel)].slice(0, MAX_RECENT);
+    const ref = this.project?.ref;
+    if (ref) void Preferences.set({ key: `recent:${ref.root}:${ref.path}`, value: JSON.stringify(this.recent) });
+  }
+
+  /** Expands the folders above a file so the explorer shows it. */
+  private revealInTree(rel: string): void {
+    let dir = parentRel(rel);
+    let changed = false;
+    while (dir) {
+      if (!this.expanded.has(dir)) {
+        this.expanded.add(dir);
+        changed = true;
+      }
+      dir = parentRel(dir);
+    }
+    if (changed && this.sidebarView === 'explorer') this.renderSidebar();
+  }
+
+  /** Builds the project class index used by Java completion and Go to Symbol. */
+  private async indexJava(force = false): Promise<void> {
+    const p = this.project;
+    if (!p || (this.javaIndexed === p && !force)) return;
+    this.javaIndexed = p;
+    const files = (this.fileIndex ?? (this.fileIndex = await p.walk())).filter((f) => f.name.endsWith('.java')).slice(0, 3000);
+    for (const f of files) {
+      if (this.project !== p) return;
+      try {
+        setProjectFileClasses(f.rel, classesInFile(f.rel, await p.read(f.rel)));
+      } catch {
+        /* unreadable file */
+      }
+    }
   }
 
   private async loadLanguage(tab: FileTab, lang: LanguageDef): Promise<void> {
@@ -482,7 +582,10 @@ export class EditorApp {
 
   private activate(tab: Tab | null): void {
     const prev = this.activeFile();
-    if (prev) prev.state = this.view.state;
+    if (prev) {
+      prev.state = this.view.state;
+      if (prev !== tab) this.rememberCursor(prev);
+    }
     this.active = tab;
     if (tab && tab.kind === 'file') this.view.setState(tab.state);
     this.renderAll();
@@ -561,7 +664,7 @@ export class EditorApp {
     for (const t of this.tabs) if (isDirtyFile(t)) await this.save(t);
   }
 
-  private async save(tab: FileTab): Promise<boolean> {
+  private async save(tab: FileTab, auto = false): Promise<boolean> {
     if (!this.project || tab.binary) return false;
     if (this.active === tab) tab.state = this.view.state;
     try {
@@ -572,7 +675,10 @@ export class EditorApp {
     }
     tab.dirty = false;
     this.renderTabs();
-    void this.track('save', tab);
+    // Autosaves are not user saves, so they send no heartbeat (edits already did).
+    if (!auto) void this.track('save', tab);
+    if (tab.lang.id === 'java') setProjectFileClasses(tab.rel, classesInFile(tab.rel, tab.state.doc.toString()));
+    this.rememberCursor(tab);
     if (this.scm.status?.repo) void this.scm.refresh();
     return true;
   }
@@ -586,7 +692,7 @@ export class EditorApp {
     return {
       path: this.project!.absPath(tab.rel),
       project: this.project!.name,
-      language: tab.lang.name,
+      language: cliLanguageOf(tab.lang),
       line: line.number,
       column: head - line.from + 1,
       lines: state.doc.lines,
@@ -631,7 +737,13 @@ export class EditorApp {
         tab.dirty = true;
         this.renderTabs();
       }
-      if (u.transactions.some(isUserEdit)) void this.track('edit', tab);
+      if (u.transactions.some(isUserEdit)) {
+        void this.track('edit', tab);
+        if (this.prefs.autoSave) {
+          clearTimeout(this.autoSaveTimer);
+          this.autoSaveTimer = window.setTimeout(() => { if (tab.dirty) void this.save(tab, true); }, 1500);
+        }
+      }
       const info = this.activeFileInfo();
       if (info) for (const fn of this.docListeners) fn(info);
     }
@@ -645,7 +757,10 @@ export class EditorApp {
     const project = this.project;
     const show = (files: Entry[]) => showQuickPick({
       placeholder: 'Search files by name',
-      items: files.map((f) => ({ label: f.name, description: parentRel(f.rel), run: () => void this.openFile(f.rel, true) })),
+      items: [
+        ...this.recent.filter((r) => files.some((f) => f.rel === r)).map((r) => ({ label: baseName(r), description: parentRel(r), detail: 'recently opened', run: () => void this.openFile(r, true) })),
+        ...files.filter((f) => !this.recent.includes(f.rel)).map((f) => ({ label: f.name, description: parentRel(f.rel), run: () => void this.openFile(f.rel, true) })),
+      ],
       matchOn: 'description',
     });
     if (this.fileIndex) return show(this.fileIndex);
@@ -788,7 +903,7 @@ export class EditorApp {
         role: 'treeitem',
       },
       isDir ? icon(open ? 'chevron-down' : 'chevron-right', 'twisty') : h('span', { class: 'twisty' }),
-      icon(isDir ? (open ? 'folder-opened' : 'folder') : 'file', 'file-icon'),
+      isDir ? icon(open ? 'folder-opened' : 'folder', 'file-icon') : fileIcon(e.name),
       h('span', { class: 'tree-label' }, e.name),
       iconButton('ellipsis', 'More actions', (ev) => { ev.stopPropagation(); this.entryMenu(e); }, 'row-more'));
       row.addEventListener('click', () => {
@@ -821,6 +936,7 @@ export class EditorApp {
       items: [
         { label: 'New File...', run: () => void this.createEntry('file', dir) },
         { label: 'New Folder...', run: () => void this.createEntry('directory', dir) },
+        { label: 'New Java Class...', run: () => void this.newJavaClass(dir) },
         { label: 'Rename...', run: () => void this.renameEntry(e) },
         { label: 'Delete', run: () => void this.deleteEntry(e) },
       ],
@@ -993,11 +1109,15 @@ export class EditorApp {
         void this.closeTab(t);
       });
       const el = h('div', { class: `tab${isActive ? ' active' : ''}${dirty ? ' is-dirty' : ''}`, role: 'tab', title: t.kind === 'file' ? t.rel : t.name },
-        icon(t.kind === 'file' ? 'file' : t.page === 'settings' ? 'settings-gear' : 'output', 'tab-icon'),
+        t.kind === 'file' ? fileIcon(t.name, 'tab-icon') : icon(t.page === 'settings' ? 'settings-gear' : 'output', 'tab-icon'),
         h('span', { class: 'tab-label' }, t.name),
         close);
       el.addEventListener('click', () => this.activate(t));
       el.addEventListener('auxclick', (e) => { if (e.button === 1) void this.closeTab(t); });
+      el.addEventListener('contextmenu', (e) => { e.preventDefault(); this.tabMenu(t); });
+      let press: number | undefined;
+      el.addEventListener('touchstart', () => { press = window.setTimeout(() => this.tabMenu(t), 550); }, { passive: true });
+      for (const n of ['touchend', 'touchmove', 'touchcancel']) el.addEventListener(n, () => clearTimeout(press), { passive: true });
       this.tabBar.append(el);
       if (isActive) setTimeout(() => el.scrollIntoView({ block: 'nearest', inline: 'nearest' }), 0);
     }
@@ -1049,7 +1169,7 @@ export class EditorApp {
       el.title = s.lastOkAt ? `Last heartbeat accepted by wakatime-cli at ${new Date(s.lastOkAt).toLocaleString()}${s.cliLastSentAt ? `. CLI last synced to the server at ${s.cliLastSentAt}` : ''}` : 'Tracking on. No heartbeat sent yet.';
       el.classList.remove('off');
     } else {
-      el.append(icon('warning'), h('span', {}, `Hackatime: tracking off (${s.reason})`));
+      el.append(icon('warning'), h('span', { class: 'long' }, `Hackatime: tracking off (${s.reason})`), h('span', { class: 'short' }, 'Hackatime: off'));
       el.title = s.detail ?? s.reason;
       el.classList.add('off');
     }
@@ -1063,6 +1183,7 @@ export class EditorApp {
     this.status.project.prepend(icon('folder'));
     const show = !!t && !t.binary;
     for (const k of ['pos', 'indent', 'encoding', 'language'] as const) this.status[k].hidden = !show;
+    this.renderBreadcrumbs();
     if (!t || !show) return;
     const state = this.view.state;
     const head = state.selection.main.head;
@@ -1072,6 +1193,222 @@ export class EditorApp {
     this.status.indent.textContent = `Spaces: ${this.prefs.tabSize}`;
     this.status.encoding.textContent = 'UTF-8';
     this.status.language.textContent = t.lang.id === 'tsx' ? 'TypeScript JSX' : t.lang.name;
+  }
+
+
+  // ------------------------------------------------------------ gestures
+
+  private bindGestures(): void {
+    // Pinch with two fingers on the editor to change the font size.
+    let pinch: { dist: number; size: number } | null = null;
+    const dist = (t: TouchList) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    this.editorHost.addEventListener('touchstart', (e) => {
+      if (e.touches.length === 2) pinch = { dist: dist(e.touches), size: this.prefs.fontSize };
+    }, { passive: true });
+    this.editorHost.addEventListener('touchmove', (e) => {
+      if (!pinch || e.touches.length !== 2) return;
+      const size = Math.round(Math.min(32, Math.max(8, pinch.size * (dist(e.touches) / pinch.dist))));
+      if (size !== this.prefs.fontSize) {
+        this.prefs.fontSize = size;
+        this.view.dispatch({ effects: fontConf.reconfigure(fontTheme(size)) });
+      }
+    }, { passive: true });
+    this.editorHost.addEventListener('touchend', () => {
+      if (pinch && pinch.size !== this.prefs.fontSize) {
+        void this.setPrefs({ fontSize: this.prefs.fontSize });
+        toast(`Font size ${this.prefs.fontSize}px`);
+      }
+      pinch = null;
+    }, { passive: true });
+
+    // Swipe in from the left edge to open the drawer at phone width.
+    let edge: { x: number; y: number } | null = null;
+    this.root.addEventListener('touchstart', (e) => {
+      const t = e.touches[0];
+      edge = !this.wide.matches && !this.sidebarOpen && e.touches.length === 1 && t.clientX < 24 ? { x: t.clientX, y: t.clientY } : null;
+    }, { passive: true });
+    this.root.addEventListener('touchmove', (e) => {
+      if (!edge) return;
+      const t = e.touches[0];
+      if (t.clientX - edge.x > 60 && Math.abs(t.clientY - edge.y) < 50) {
+        edge = null;
+        this.setSidebar(true);
+        this.renderSidebar();
+      }
+    }, { passive: true });
+  }
+
+  // ---------------------------------------------------------- navigation
+
+  private openRecent(): void {
+    if (!this.recent.length) return toast('No recent files yet');
+    showQuickPick({
+      placeholder: 'Open recent file',
+      items: this.recent.map((r) => ({ label: baseName(r), description: parentRel(r), run: () => void this.openFile(r, true).catch(() => undefined) })),
+      matchOn: 'description',
+    });
+  }
+
+  private fileSymbols(): JavaSymbol[] | null {
+    const t = this.activeFile();
+    if (!t || t.lang.id !== 'java') return null;
+    const doc = this.view.state.doc;
+    if (this.symbolCache?.doc !== doc) this.symbolCache = { doc, symbols: javaSymbols(doc.toString()) };
+    return this.symbolCache.symbols;
+  }
+
+  gotoSymbolInFile(): void {
+    const syms = this.fileSymbols();
+    if (!syms) return toast('Symbols are available for Java files');
+    showQuickPick({
+      placeholder: syms.length ? 'Go to symbol in file' : 'No symbols found',
+      items: syms.map((sym) => ({
+        label: sym.name,
+        description: `${sym.kind}${sym.container ? ` in ${sym.container}` : ''}`,
+        detail: `line ${sym.line}`,
+        run: () => goToLine(this.view, sym.line),
+      })),
+    });
+  }
+
+  async gotoWorkspaceSymbol(): Promise<void> {
+    if (!this.project) return;
+    if (this.javaIndexed !== this.project) {
+      toast('Indexing Java files...');
+      await this.indexJava();
+    }
+    const classes = allProjectClasses();
+    if (!classes.length) return toast('No Java classes in this project');
+    showQuickPick({
+      placeholder: 'Go to class in project',
+      items: classes.map((c) => ({ label: c.name, description: c.pkg || parentRel(c.rel), detail: c.kind, run: () => void this.openFile(c.rel, true, c.line) })),
+    });
+  }
+
+  private renderBreadcrumbs(): void {
+    const t = this.activeFile();
+    clear(this.breadcrumbs);
+    this.breadcrumbs.hidden = !t || !!t.binary;
+    if (!t || t.binary) return;
+    const parts = t.rel.split('/');
+    // Long Java paths: collapse the middle of src/main/java/com/... to keep it readable.
+    const shown = parts.length > 5 ? [parts[0], '…', ...parts.slice(-3)] : parts;
+    shown.forEach((part, i) => {
+      if (i) this.breadcrumbs.append(icon('chevron-right', 'crumb-sep'));
+      const last = i === shown.length - 1;
+      const el = h('button', { class: `crumb${last ? ' file' : ''}`, title: t.rel }, last ? fileIcon(part, 'crumb-icon') : null, part);
+      el.addEventListener('click', () => (last ? this.gotoSymbolInFile() : this.showSidebar('explorer')));
+      this.breadcrumbs.append(el);
+    });
+    const syms = this.fileSymbols();
+    if (syms?.length) {
+      const line = this.view.state.doc.lineAt(this.view.state.selection.main.head).number;
+      let current: JavaSymbol | undefined;
+      for (const sym of syms) if (sym.line <= line && sym.kind !== 'field') current = sym;
+      if (current) {
+        this.breadcrumbs.append(icon('chevron-right', 'crumb-sep'));
+        const el = h('button', { class: 'crumb symbol' }, icon(current.kind === 'method' ? 'symbol-method' : 'symbol-class'), current.name);
+        el.addEventListener('click', () => this.gotoSymbolInFile());
+        this.breadcrumbs.append(el);
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- tabs
+
+  private tabMenu(t: Tab): void {
+    const items: QuickItem[] = [
+      { label: 'Close', run: () => void this.closeTab(t) },
+      { label: 'Close Others', run: () => void this.closeOthers(t) },
+      { label: 'Close Saved', run: () => void this.closeSaved() },
+      { label: 'Close All', run: () => void this.closeAllTabs() },
+    ];
+    if (t.kind === 'file') {
+      items.push({ label: 'Reveal in Explorer', run: () => { this.revealInTree(t.rel); this.showSidebar('explorer'); } });
+      items.push({ label: 'Copy Path', run: () => void navigator.clipboard?.writeText(t.rel).then(() => toast('Path copied'), () => toast(t.rel)) });
+    }
+    showQuickPick({ placeholder: t.kind === 'file' ? t.rel : t.name, items });
+  }
+
+  private async closeOthers(keep: Tab | null): Promise<void> {
+    if (!keep) return;
+    const others = this.tabs.filter((t) => t !== keep);
+    if (!(await this.confirmDiscard(others.filter(isDirtyFile)))) return;
+    this.tabs = [keep];
+    this.activate(keep);
+    this.persistTabs();
+  }
+
+  private async closeSaved(): Promise<void> {
+    this.tabs = this.tabs.filter((t) => t.kind === 'page' || t.dirty);
+    if (this.active && !this.tabs.includes(this.active)) {
+      if (this.active.kind === 'file') this.active = null;
+      this.activate(this.tabs[0] ?? null);
+    } else this.renderTabs();
+    this.persistTabs();
+  }
+
+  // ---------------------------------------------------------------- java
+
+  async newJavaClass(dir: string): Promise<void> {
+    const p = this.project;
+    if (!p) return;
+    const kinds: { kind: JavaKind; label: string; description: string }[] = [
+      { kind: 'class', label: 'Class', description: 'public class' },
+      { kind: 'interface', label: 'Interface', description: 'public interface' },
+      { kind: 'enum', label: 'Enum', description: 'public enum' },
+      { kind: 'record', label: 'Record', description: 'public record' },
+      { kind: 'mixin', label: 'Mixin', description: 'Mixin class with an @Inject' },
+      { kind: 'fabric-initializer', label: 'Fabric ModInitializer', description: 'main mod class for Fabric' },
+    ];
+    const chosen = await new Promise<JavaKind | null>((resolve) => {
+      showQuickPick({
+        placeholder: 'New Java type',
+        items: kinds.map((k) => ({ label: k.label, description: k.description, run: () => resolve(k.kind) })),
+        onCancel: () => resolve(null),
+      });
+    });
+    if (!chosen) return;
+    const pkg = packageForDir(dir);
+    const name = await promptText(`Name${pkg ? ` (package ${pkg})` : ''}`, chosen === 'fabric-initializer' ? `${p.name.replace(/[^A-Za-z0-9]/g, '') || 'My'}Mod` : '', validJavaName);
+    if (!name) return;
+    const rel = joinRel(dir, `${name.trim()}.java`);
+    if (await p.exists(rel)) return alertText('File exists', rel);
+    const modId = p.name.toLowerCase().replace(/[^a-z0-9_]/g, '') || 'modid';
+    try {
+      await p.write(rel, javaTemplate(pkg, name.trim(), chosen, modId));
+    } catch (e) {
+      return alertText('Could not create', String(e));
+    }
+    this.expanded.add(dir);
+    this.refreshTree();
+    await this.openFile(rel, true);
+    setProjectFileClasses(rel, classesInFile(rel, await p.read(rel)));
+    if (!pkg) toast('Tip: put Java files under src/main/java/<package> so the package is filled in');
+  }
+
+  private async addGradleWorkflow(): Promise<void> {
+    const p = this.project;
+    if (!p) return;
+    const rel = '.github/workflows/build.yml';
+    if (await p.exists(rel)) {
+      await this.openFile(rel, true);
+      return toast('A build workflow already exists');
+    }
+    if (!(await p.exists('gradlew')) && !(await p.exists('build.gradle')) && !(await p.exists('build.gradle.kts'))) {
+      const r = await choose('No Gradle build found', 'This folder has no gradlew or build.gradle at its root. Add the workflow anyway?', [
+        { id: 'yes', label: 'Add anyway', primary: true }, { id: 'no', label: 'Cancel' },
+      ]);
+      if (r !== 'yes') return;
+    }
+    const jdk = await choose('Java version', 'Minecraft 1.20.5 and newer need Java 21. Older versions use Java 17.', [
+      { id: '21', label: 'Java 21', primary: true }, { id: '17', label: 'Java 17' },
+    ]);
+    if (!jdk) return;
+    await p.write(rel, gradleWorkflow(jdk));
+    this.refreshTree();
+    await this.openFile(rel, true);
+    await alertText('Build workflow added', 'Commit and push it. GitHub Actions then builds your mod on every push; the .jar is under the run\'s Artifacts on github.com (Actions tab).');
   }
 
   // ------------------------------------------------------------- prefs
@@ -1108,14 +1445,36 @@ export class EditorApp {
       });
       bar.append(b);
     };
-    const ins = (s: string) => () => insertText(this.view, s);
+    const ins = (s: string) => () => {
+      // Brackets and quotes behave like typing them (auto-close, skip over).
+      const tr = '([{"\''.includes(s) || ')]}'.includes(s) ? insertBracket(this.view.state, s) : null;
+      if (tr) {
+        this.view.dispatch(tr);
+        this.view.focus();
+      } else insertText(this.view, s);
+    };
     const cmd = (fn: (v: EditorView) => boolean) => () => { fn(this.view); this.view.focus(); };
+    const edit = (fn: (t: { state: EditorState; dispatch: (tr: import('@codemirror/state').Transaction) => void }) => boolean) => () => {
+      fn({ state: this.view.state, dispatch: (tr) => this.view.dispatch(tr) });
+      this.view.focus();
+    };
+    const sep = () => bar.append(h('span', { class: 'kb-sep' }));
     key('Tab', 'Tab', () => insertText(this.view, ' '.repeat(this.prefs.tabSize)));
-    for (const ch of ['(', ')', '{', '}', '[', ']', '<', '>', '"', "'", '`', ';', '=', ':', '/']) key(ch, `Insert ${ch}`, ins(ch));
     key(icon('arrow-left'), 'Left', cmd(cursorCharLeft));
     key(icon('arrow-up'), 'Up', cmd(cursorLineUp));
     key(icon('arrow-down'), 'Down', cmd(cursorLineDown));
     key(icon('arrow-right'), 'Right', cmd(cursorCharRight));
+    sep();
+    for (const ch of ['(', ')', '{', '}', '[', ']', ';', '.', ',', '=', '"', "'", '<', '>', '!', '&', '|', '+', '-', '*', '/', '@', ':', '_', '?', '%', '#', '`']) key(ch, `Insert ${ch}`, ins(ch));
+    sep();
+    key('Home', 'Line start', cmd(cursorLineBoundaryBackward));
+    key('End', 'Line end', cmd(cursorLineBoundaryForward));
+    key(icon('arrow-small-left'), 'Outdent', edit(indentLess));
+    key(icon('arrow-small-right'), 'Indent', edit(indentMore));
+    key('//', 'Toggle comment', edit(toggleComment));
+    key(icon('search'), 'Find', () => this.openFind());
+    key(icon('symbol-method'), 'Go to Symbol', () => this.gotoSymbolInFile());
+    sep();
     key(icon('discard'), 'Undo', cmd(undo));
     key(icon('redo'), 'Redo', cmd(redo));
     key(icon('save'), 'Save', () => void this.saveActive());
@@ -1131,4 +1490,33 @@ export class EditorApp {
 
 function isDirtyFile(t: Tab | null): t is FileTab {
   return !!t && t.kind === 'file' && t.dirty;
+}
+
+function gradleWorkflow(jdk: string): string {
+  return `name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '${jdk}'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Build
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build
+      - uses: actions/upload-artifact@v5
+        with:
+          name: mod-jar
+          path: build/libs/*.jar
+`;
 }

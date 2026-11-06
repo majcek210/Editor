@@ -16,6 +16,8 @@ export interface QuickPickOptions {
   /** Called on Enter when there are no items (for example Go to Line). */
   onAccept?: (query: string) => void;
   matchOn?: 'label' | 'description';
+  /** Called when the picker closes without a choice. */
+  onCancel?: () => void;
 }
 
 let current: { close: () => void } | null = null;
@@ -58,7 +60,9 @@ export function showQuickPick(opts: QuickPickOptions): void {
     if (!shown.length && !opts.onAccept) list.append(h('div', { class: 'qp-empty' }, 'No matching results'));
     list.querySelector('.selected')?.scrollIntoView({ block: 'nearest' });
   };
+  let accepted = false;
   const accept = (i: number) => {
+    accepted = true;
     const it = shown[i];
     if (it) {
       close();
@@ -83,6 +87,7 @@ export function showQuickPick(opts: QuickPickOptions): void {
   function close() {
     back.remove();
     current = null;
+    if (!accepted) opts.onCancel?.();
   }
   current = { close };
   document.body.append(back);

@@ -149,6 +149,53 @@ unsaved changes are reloaded from disk.
 Git and time tracking are separate: Git operations never send heartbeats,
 and files changed by a pull or checkout do not count as edits.
 
+## Java and Minecraft mods
+
+There is no Java compiler or Gradle on the phone, so building happens on
+GitHub; everything else works in the editor:
+
+- **Completion** for Java keywords, common JDK types, Fabric/Mixin/SLF4J
+  types and your project's own classes. Picking a type adds its `import`
+  (sorted, skipped for `java.lang`, the same package or wildcard imports).
+- **Snippets**: `main`, `sout`, `fori`, `foreach`, `if`, `ifelse`, `while`,
+  `trycatch`, `switch`, `override`, `logger` (SLF4J, adds imports) and
+  `inject` (Mixin `@Inject` at HEAD, adds imports).
+- **New Java Class** (long-press a folder, or `Java: New Class...`): class,
+  interface, enum, record, Mixin or Fabric `ModInitializer`. The package is
+  taken from the folder (`src/main/java/com/example/mod` gives
+  `com.example.mod`; `src/client/java` works too).
+- **Go to Symbol in File** (Ctrl+Shift+O, or the method button on the
+  keyboard toolbar) and **Go to Class in Project** (Ctrl+T). The breadcrumb
+  bar above the editor shows the file path and the method you are in.
+- Highlighting for the files a mod uses: Java, Kotlin, `build.gradle`
+  (Groovy), `*.gradle.kts`, `gradle.properties`, `mods.toml`,
+  `fabric.mod.json`, `*.mixins.json`, `pack.mcmeta`, lang files, YAML, XML and
+  `gradlew`.
+- **Build on GitHub**: `Java: Add GitHub Actions Build (Gradle)` writes
+  `.github/workflows/build.yml` (Java 21 or 17). Commit and push from Source
+  Control; GitHub builds the mod on each push and the `.jar` appears under the
+  run's Artifacts.
+
+Completion and symbols are regex and syntax-tree based, not a full Java
+compiler: there are no type errors, no completion of methods after a `.`, and
+no Minecraft class names (they depend on your mappings). Use the build on
+GitHub to check that the mod compiles.
+
+## Editing on a phone
+
+- Keyboard toolbar: Tab, arrows, all common symbols (brackets and quotes
+  auto-close), Home/End, indent/outdent, toggle comment, Find, Go to Symbol,
+  Undo, Redo, Save. Scroll it sideways.
+- Pinch the editor with two fingers to change the font size.
+- Swipe in from the left edge to open the sidebar.
+- Long-press a tab for Close, Close Others, Close Saved, Close All, Reveal in
+  Explorer and Copy Path.
+- Quick open (Ctrl+P) lists recently opened files first; Ctrl+R opens the
+  recent list directly.
+- Files reopen at the cursor position you left them at.
+- Optional auto save (Settings, Editor): saves 1.5 s after you stop typing.
+  Autosaves send no heartbeat; your typing already counts.
+
 ## Features
 
 - Activity bar (Explorer, Search, Tracking Log, Settings), collapsible

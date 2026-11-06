@@ -58,6 +58,8 @@ export function renderSettings(host: HTMLElement, app: EditorApp): void {
     h('button', { class: 'btn secondary', onclick: () => void app.setPrefs({ fontSize: Math.min(32, app.prefs.fontSize + 1) }) }, '+'));
   const wrap = h('input', { type: 'checkbox', checked: app.prefs.softWrap });
   wrap.addEventListener('change', () => void app.setPrefs({ softWrap: wrap.checked }));
+  const autoSave = h('input', { type: 'checkbox', checked: app.prefs.autoSave });
+  autoSave.addEventListener('change', () => void app.setPrefs({ autoSave: autoSave.checked }));
   const tab = h('select', { class: 'text-input' }, ...[2, 4, 8].map((n) => h('option', { value: n, selected: app.prefs.tabSize === n }, String(n))));
   tab.addEventListener('change', () => void app.setPrefs({ tabSize: Number(tab.value) }));
 
@@ -91,6 +93,8 @@ export function renderSettings(host: HTMLElement, app: EditorApp): void {
     row('Font size', fontSize),
     row('Soft wrap', h('label', { class: 'check' }, wrap, ' Wrap long lines')),
     row('Tab size', tab),
+    row('Auto save', h('label', { class: 'check' }, autoSave, ' Save 1.5 s after you stop typing'),
+      'Autosaves do not send a write heartbeat; your typing already counts.'),
     h('h2', {}, 'About'),
     h('p', { class: 'muted' }, 'Hackatime Editor is not affiliated with Hack Club or WakaTime. Icons: Codicons (CC BY 4.0). Editor: CodeMirror 6 (MIT). Tracking: wakatime-cli (BSD 3-Clause).')));
 }
